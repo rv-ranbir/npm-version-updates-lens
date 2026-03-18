@@ -16,14 +16,16 @@ export class NpmRegistryClient {
   private readonly registryUrl: string;
   private readonly ttlMs: number;
   private readonly versionSource: 'npmCli' | 'registryFetch';
+  private readonly log?: (line: string) => void;
 
-  constructor() {
+  constructor(log?: (line: string) => void) {
     const cfg = vscode.workspace.getConfiguration('packageUpdates');
     this.registryUrl = String(cfg.get('registryUrl') ?? 'https://registry.npmjs.org').replace(/\/+$/, '');
     const ttlSeconds = Number(cfg.get('cacheTtlSeconds') ?? 900);
     this.ttlMs = Math.max(0, ttlSeconds) * 1000;
     const src = String(cfg.get('versionSource') ?? 'npmCli');
     this.versionSource = src === 'registryFetch' ? 'registryFetch' : 'npmCli';
+    this.log = log;
   }
 
   private cacheGet<T>(key: string): T | undefined {
@@ -71,7 +73,10 @@ export class NpmRegistryClient {
         // Best-effort: extract the last JSON object/array from mixed output.
         const combined = `${String(stderr || '')}\n${text}`;
         const m = combined.match(/(\{[\s\S]*\}|\[[\s\S]*\])\s*$/);
-        if (!m) return { latest: null, versions: [] };
+        if (!m) {
+          this.log?.(`npm view JSON parse failed for ${packageName}: no trailing JSON found`);
+          return { latest: null, versions: [] };
+        }
         data = JSON.parse(m[1]);
       }
       const versionsRaw = data?.versions;
@@ -82,7 +87,8 @@ export class NpmRegistryClient {
       const latest = typeof distTags?.latest === 'string' ? distTags.latest : null;
 
       return { latest, versions };
-    } catch {
+    } catch (err: any) {
+      this.log?.(`npm view failed for ${packageName}: ${err?.message ?? String(err)}`);
       return { latest: null, versions: [] };
     }
   }
@@ -106,7 +112,8 @@ export class NpmRegistryClient {
       const latestStr = typeof latest === 'string' ? latest : null;
       const versions = body?.versions && typeof body.versions === 'object' ? Object.keys(body.versions) : [];
       return { latest: latestStr, versions };
-    } catch {
+    } catch (err: any) {
+      this.log?.(`registry fetch failed for ${packageName}: ${err?.message ?? String(err)}`);
       return { latest: null, versions: [] };
     }
   }
@@ -120,7 +127,9 @@ export class NpmRegistryClient {
       const fromCli = await this.getPackumentViaNpmCli(packageName);
       // If npm isn't available/configured in the Extension Host, fall back to public registry fetch
       // so public packages still work out of the box.
-      const packument = fromCli.versions.length > 0 || fromCli.latest ? fromCli : await this.getPackumentViaRegistryFetch(packageName, signal);
+      const shouldFallback = (fromCli.versions.length ?? 0) === 0 && !fromCli.latest;
+      if (shouldFallback) this.log?.(`No usable data from npm view for ${packageName}; falling back to registry fetch`);
+      const packument = shouldFallback ? await this.getPackumentViaRegistryFetch(packageName, signal) : fromCli;
       this.cacheSet(cacheKey, packument);
       return packument;
     }

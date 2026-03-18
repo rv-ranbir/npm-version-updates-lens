@@ -86,7 +86,14 @@ export function activate(context: vscode.ExtensionContext) {
   const deco = createDecorations();
   const updatesByFile: WorkspaceUpdates = new Map();
 
-  let registry = new NpmRegistryClient();
+  const output = vscode.window.createOutputChannel('npm Version Updates Lens');
+  output.appendLine('Activated.');
+  context.subscriptions.push(output);
+  const log = (line: string) => {
+    output.appendLine(line);
+  };
+
+  let registry = new NpmRegistryClient(log);
   const codeLensProvider = new PackageUpdatesCodeLensProvider((uri) => updatesByFile.get(uri.toString()));
   const treeProvider = new WorkspaceUpdatesTreeProvider(() => updatesByFile);
 
@@ -327,7 +334,8 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('packageUpdates')) {
-        registry = new NpmRegistryClient();
+        output.appendLine('Config changed: recreating registry client.');
+        registry = new NpmRegistryClient(log);
         codeLensProvider.refresh();
         treeProvider.refresh();
       }
