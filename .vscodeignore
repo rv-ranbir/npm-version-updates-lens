@@ -5,4 +5,5 @@ src/**
 *.ts
 tsconfig.json
 *.map
+.env
 
