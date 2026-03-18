@@ -1,0 +1,12 @@
+node_modules/
+out/
+*.vsix
+*.log
+.DS_Store
+
+# VS Code / Cursor
+.vscode-test/
+
+# TypeScript
+*.tsbuildinfo
+

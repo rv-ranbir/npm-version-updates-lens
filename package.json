@@ -1,0 +1,150 @@
+{
+  "name": "npm-version-updates-lens",
+  "displayName": "npm Version Updates Lens",
+  "description": "Check and apply npm dependency version updates in package.json (patch/minor/major) using CodeLens actions and a workspace tree view.",
+  "version": "0.0.1",
+  "publisher": "RanbirVerma",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rv-ranbir/npm-version-updates-lens.git"
+  },
+  "homepage": "https://github.com/rv-ranbir/npm-version-updates-lens",
+  "bugs": {
+    "url": "https://github.com/rv-ranbir/npm-version-updates-lens/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": [
+    "npm",
+    "package.json",
+    "dependency",
+    "dependencies",
+    "devDependencies",
+    "version",
+    "versions",
+    "update",
+    "updates",
+    "upgrade",
+    "semver",
+    "codelens"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "packageUpdates.scanWorkspace",
+        "title": "Package Updates: Scan workspace"
+      },
+      {
+        "command": "packageUpdates.scanFile",
+        "title": "Package Updates: Scan current package.json"
+      },
+      {
+        "command": "packageUpdates.scanSection",
+        "title": "Package Updates: Scan dependencies section"
+      },
+      {
+        "command": "packageUpdates.showUpdates",
+        "title": "Package Updates: Show update suggestions"
+      },
+      {
+        "command": "packageUpdates.applyUpdate",
+        "title": "Package Updates: Apply update"
+      },
+      {
+        "command": "packageUpdates.updateAllInFile",
+        "title": "Package Updates: Update all in file"
+      },
+      {
+        "command": "packageUpdates.updateAllInSection",
+        "title": "Package Updates: Update all in section"
+      },
+      {
+        "command": "packageUpdates.revealDependency",
+        "title": "Package Updates: Reveal dependency"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "packageUpdates.workspaceView",
+          "name": "Package Updates"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "packageUpdates.scanWorkspace",
+          "when": "view == packageUpdates.workspaceView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "npm Version Updates Lens",
+      "properties": {
+        "packageUpdates.scanMode": {
+          "type": "string",
+          "default": "manual",
+          "enum": ["manual", "automatic"],
+          "description": "When 'automatic', scans on startup and when saving package.json. When 'manual', only scans when you run commands or click CodeLens actions."
+        },
+        "packageUpdates.showInlineHints": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show end-of-line inline hints next to dependencies (can be noisy)."
+        },
+        "packageUpdates.versionSource": {
+          "type": "string",
+          "default": "npmCli",
+          "enum": ["npmCli", "registryFetch"],
+          "description": "How to fetch package versions. 'npmCli' uses `npm view` (supports private packages via your npm auth/.npmrc). 'registryFetch' uses unauthenticated HTTP requests to registryUrl."
+        },
+        "packageUpdates.registryUrl": {
+          "type": "string",
+          "default": "https://registry.npmjs.org",
+          "description": "npm registry base URL to query for package versions."
+        },
+        "packageUpdates.includeDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include dependencies in update checks."
+        },
+        "packageUpdates.includeDevDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include devDependencies in update checks."
+        },
+        "packageUpdates.cacheTtlSeconds": {
+          "type": "number",
+          "default": 900,
+          "minimum": 0,
+          "description": "Cache TTL for registry lookups in seconds (0 disables caching)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "semver": "^7.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/semver": "^7.7.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.1",
+    "ovsx": "^0.10.4",
+    "typescript": "^5.8.2"
+  }
+}
