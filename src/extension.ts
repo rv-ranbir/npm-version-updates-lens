@@ -7,6 +7,8 @@ import { DepSection, PackageUpdateInfo } from './types';
 import { PackageUpdatesCodeLensProvider } from './codeLens';
 import { parseDependencyValueLocations } from './packageJsonRanges';
 import { WorkspaceUpdatesTreeProvider } from './workspaceTree';
+import { OsvClient } from './osvClient';
+import { getNpmDeprecatedMessage } from './deprecationChecker';
 
 type WorkspaceUpdates = Map<string, PackageUpdateInfo[]>;
 
@@ -96,6 +98,9 @@ export function activate(context: vscode.ExtensionContext) {
   let registry = new NpmRegistryClient(log);
   const codeLensProvider = new PackageUpdatesCodeLensProvider((uri) => updatesByFile.get(uri.toString()));
   const treeProvider = new WorkspaceUpdatesTreeProvider(() => updatesByFile);
+  const diagnostics = vscode.languages.createDiagnosticCollection('npm-version-updates-lens');
+  context.subscriptions.push(diagnostics);
+  const osv = new OsvClient(15 * 60 * 1000, log);
 
   const scanUris = async (uris: vscode.Uri[], sections: DepSection[]) => {
     if (sections.length === 0) {
@@ -283,6 +288,117 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  const runChecks = async () => {
+    const picked = await vscode.window.showQuickPick(
+      [
+        { label: 'Deprecated packages', id: 'deprecated' as const },
+        { label: 'Vulnerabilities (OSV)', id: 'osv' as const },
+        { label: 'Deprecated + Vulnerabilities', id: 'both' as const }
+      ],
+      { title: 'Package Updates: Run checks', canPickMany: false }
+    );
+    if (!picked) return;
+
+    const uris = await findAllPackageJsonFiles();
+    if (uris.length === 0) {
+      vscode.window.showInformationMessage('Package Updates: no package.json files found.');
+      return;
+    }
+
+    diagnostics.clear();
+
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Package Updates: running checks…', cancellable: true },
+      async (progress, token) => {
+        let done = 0;
+
+        for (const uri of uris) {
+          if (token.isCancellationRequested) break;
+          const doc = await vscode.workspace.openTextDocument(uri);
+          const locs = parseDependencyValueLocations(doc);
+          const updates = updatesByFile.get(uri.toString());
+
+          // If we haven't scanned yet, run a lightweight scan for this file to get currentBase values.
+          const effectiveUpdates =
+            updates && updates.length ? updates : (await computeUpdatesForPackageJson(uri, registry, getIncludedSections())) ?? [];
+
+          const locMap = new Map<string, vscode.Range>();
+          for (const l of locs) locMap.set(`${l.section}:${l.name}`, l.valueRange);
+
+          const fileDiagnostics: vscode.Diagnostic[] = [];
+
+          // Limit per-file concurrency to keep it responsive.
+          // IMPORTANT: only check dependencies that still exist in the *current* document.
+          // Otherwise cached `updatesByFile` can include deps the user already removed.
+          const toCheck = effectiveUpdates
+            .filter((u) => locMap.has(`${u.section}:${u.name}`))
+            .filter((u) => u.currentBase);
+
+          await mapLimit(toCheck, 8, async (u) => {
+            const range = locMap.get(`${u.section}:${u.name}`) ?? new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0));
+            const version = u.currentBase!;
+
+            let deprecatedMsg: string | null = null;
+            let osvRes: Awaited<ReturnType<typeof osv.queryNpmPackage>> | null = null;
+
+            if (picked.id === 'deprecated' || picked.id === 'both') {
+              deprecatedMsg = await getNpmDeprecatedMessage(u.name, version, log);
+            }
+
+            if (picked.id === 'osv' || picked.id === 'both') {
+              osvRes = await osv.queryNpmPackage(u.name, version);
+            }
+
+            // If both exist, combine into a single diagnostic so the user always sees "Deprecated:".
+            if (deprecatedMsg && osvRes) {
+              const sev =
+                osvRes.severity === 'CRITICAL' || osvRes.severity === 'HIGH'
+                  ? vscode.DiagnosticSeverity.Error
+                  : osvRes.severity === 'MODERATE'
+                    ? vscode.DiagnosticSeverity.Warning
+                    : vscode.DiagnosticSeverity.Information;
+              const d = new vscode.Diagnostic(
+                range,
+                `Deprecated: ${deprecatedMsg}\n${osvRes.summary} for ${u.name}@${version}`,
+                sev
+              );
+              d.source = 'npm Version Updates Lens';
+              fileDiagnostics.push(d);
+              return;
+            }
+
+            if (deprecatedMsg) {
+              const d = new vscode.Diagnostic(range, `Deprecated: ${deprecatedMsg}`, vscode.DiagnosticSeverity.Warning);
+              d.source = 'npm Version Updates Lens';
+              fileDiagnostics.push(d);
+              return;
+            }
+
+            if (osvRes) {
+              const sev =
+                osvRes.severity === 'CRITICAL' || osvRes.severity === 'HIGH'
+                  ? vscode.DiagnosticSeverity.Error
+                  : osvRes.severity === 'MODERATE'
+                    ? vscode.DiagnosticSeverity.Warning
+                    : vscode.DiagnosticSeverity.Information;
+              const d = new vscode.Diagnostic(range, `${osvRes.summary} for ${u.name}@${version}`, sev);
+              d.source = 'OSV';
+              fileDiagnostics.push(d);
+              return;
+            }
+          });
+
+          if (fileDiagnostics.length) diagnostics.set(uri, fileDiagnostics);
+
+          done++;
+          progress.report({ message: `${done}/${uris.length} package.json` });
+        }
+      }
+    );
+
+    vscode.window.showInformationMessage('Package Updates: checks complete (see Problems).');
+  };
+
   context.subscriptions.push(
     vscode.commands.registerCommand('packageUpdates.scanWorkspace', scanWorkspace),
     vscode.commands.registerCommand('packageUpdates.scanFile', scanFile),
@@ -332,6 +448,7 @@ export function activate(context: vscode.ExtensionContext) {
         editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       }
     }),
+    vscode.commands.registerCommand('packageUpdates.runChecks', runChecks),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('packageUpdates')) {
         output.appendLine('Config changed: recreating registry client.');
