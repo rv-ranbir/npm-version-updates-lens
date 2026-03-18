@@ -9,3 +9,6 @@
 - Improve npm version fetching for public/private registries (fallback when `npm view` returns no data).
 - Add an Output channel (`npm Version Updates Lens`) for easier debugging.
 
+## 0.0.4
+
+- Fix runtime error: include `semver` dependency in the packaged extension (was missing due to `.vscodeignore` excluding `node_modules`).

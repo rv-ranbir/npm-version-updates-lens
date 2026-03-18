@@ -1,6 +1,8 @@
 **/.git/**
 **/.vscode/**
 **/node_modules/**
+!**/node_modules/semver/**
+!**/node_modules/semver/**
 src/**
 *.ts
 tsconfig.json
