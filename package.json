@@ -2,7 +2,7 @@
   "name": "npm-version-updates-lens",
   "displayName": "npm Version Updates Lens",
   "description": "Check and apply npm dependency version updates in package.json (patch/minor/major) using CodeLens actions and a workspace tree view.",
-  "version": "0.0.6",
+  "version": "1.0.0",
   "publisher": "RanbirVerma",
   "icon": "icon.png",
   "license": "MIT",
@@ -72,7 +72,11 @@
       },
       {
         "command": "packageUpdates.runChecks",
-        "title": "Package Updates: Run checks…"
+        "title": "Package Updates: Run Deprecated + OSV checks…"
+      },
+      {
+        "command": "packageUpdates.runLockfileVulnerabilityReport",
+        "title": "Package Updates: Lockfile OSV vulnerability report…"
       }
     ],
     "views": {
@@ -105,6 +109,11 @@
           "type": "boolean",
           "default": false,
           "description": "Show end-of-line inline hints next to dependencies (can be noisy)."
+        },
+        "packageUpdates.confirmUpdate": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, show a confirmation prompt before writing version changes to package.json."
         },
         "packageUpdates.versionSource": {
           "type": "string",

@@ -9,6 +9,17 @@ import { parseDependencyValueLocations } from './packageJsonRanges';
 import { WorkspaceUpdatesTreeProvider } from './workspaceTree';
 import { OsvClient } from './osvClient';
 import { getNpmDeprecatedMessage } from './deprecationChecker';
+import { getInstalledVersionsFromNearestLockfile } from './lockfile';
+import {
+  PackageJsonScanReportRow,
+  renderPackageJsonScanMarkdown,
+  writePackageJsonScanReportToWorkspaceRoot
+} from './packageJsonScanReport';
+import {
+  LockfileVulnReportRow,
+  renderLockfileReportMarkdown,
+  writeReportToWorkspaceRoot
+} from './lockfileReport';
 
 type WorkspaceUpdates = Map<string, PackageUpdateInfo[]>;
 
@@ -174,6 +185,117 @@ export function activate(context: vscode.ExtensionContext) {
     await scanUris([uri], [section]);
   };
 
+  const runLockfileVulnerabilityReport = async () => {
+    const uris = await findAllPackageJsonFiles();
+    if (uris.length === 0) {
+      vscode.window.showInformationMessage('Package Updates: no package.json files found.');
+      return;
+    }
+
+    diagnostics.clear();
+
+    const sections = getIncludedSections();
+    let issueCount = 0;
+    const reportRows: LockfileVulnReportRow[] = [];
+
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Package Updates: lockfile OSV report…', cancellable: true },
+      async (progress, token) => {
+        let done = 0;
+
+        for (const uri of uris) {
+          if (token.isCancellationRequested) break;
+          const doc = await vscode.workspace.openTextDocument(uri);
+
+          const locs = parseDependencyValueLocations(doc);
+          const locMap = new Map<string, vscode.Range>();
+          for (const l of locs) locMap.set(`${l.section}:${l.name}`, l.valueRange);
+
+          // Extract declared deps from package.json (so we know what to report on).
+          const parsed = extractDependenciesFromPackageJsonText(uri, doc.getText(), sections);
+          const declaredDeps = parsed?.dependencies ?? [];
+
+          // Resolve installed versions from nearest package-lock.json.
+          const lockfileData = await getInstalledVersionsFromNearestLockfile(uri, log);
+          const installedVersions = lockfileData?.installedVersions ?? null;
+          const lockfilePath = lockfileData?.lockfilePath ?? null;
+
+          const fileDiagnostics: vscode.Diagnostic[] = [];
+          const pkgJsonRel = vscode.workspace.asRelativePath(uri);
+
+          await mapLimit(declaredDeps, 8, async (dep) => {
+            if (token.isCancellationRequested) return;
+            const range = locMap.get(`${dep.section}:${dep.name}`);
+            if (!range) return;
+            const installedVersion = installedVersions?.get(dep.name);
+            if (!installedVersion) return;
+
+            const osvRes = await osv.queryNpmPackage(dep.name, installedVersion);
+            if (!osvRes) return;
+
+            const sev =
+              osvRes.severity === 'CRITICAL' || osvRes.severity === 'HIGH'
+                ? vscode.DiagnosticSeverity.Error
+                : osvRes.severity === 'MODERATE'
+                  ? vscode.DiagnosticSeverity.Warning
+                  : vscode.DiagnosticSeverity.Information;
+
+            const lockRel = lockfilePath ? vscode.workspace.asRelativePath(lockfilePath) : 'package-lock.json';
+            const diag = new vscode.Diagnostic(
+              range,
+              `${osvRes.summary} for ${dep.name}@${installedVersion} (from ${lockRel})`,
+              sev
+            );
+            if (lockfilePath) {
+              diag.code = { value: lockRel, target: vscode.Uri.file(lockfilePath) };
+            }
+            fileDiagnostics.push(diag);
+
+            if (lockfilePath) {
+              reportRows.push({
+                packageJsonRel: pkgJsonRel,
+                lockfileRel: lockRel,
+                lockfileFsPath: lockfilePath,
+                section: dep.section,
+                name: dep.name,
+                declaredRange: dep.range,
+                installedVersion,
+                severity: osvRes.severity,
+                summary: osvRes.summary,
+                vulnIds: osvRes.vulnIds,
+                detailsUrl: osvRes.detailsUrl
+              });
+            }
+          });
+
+          for (const d of fileDiagnostics) {
+            d.source = 'OSV (package-lock.json)';
+            issueCount++;
+          }
+
+          if (fileDiagnostics.length) diagnostics.set(uri, fileDiagnostics);
+
+          done++;
+          progress.report({ message: `${done}/${uris.length} package.json` });
+        }
+      }
+    );
+
+    const md = renderLockfileReportMarkdown(reportRows);
+    const reportUri = await writeReportToWorkspaceRoot(md);
+
+    const openReport = 'Open Markdown report';
+    const msg = reportUri
+      ? `Package Updates: lockfile OSV report complete (${issueCount} issues). Markdown written to workspace root. See Problems — click the diagnostic code to open package-lock.json.`
+      : `Package Updates: lockfile OSV report complete (${issueCount} issues). See Problems — click the diagnostic code to open package-lock.json.`;
+
+    const picked = await vscode.window.showInformationMessage(msg, ...(reportUri ? [openReport] : []));
+    if (picked === openReport && reportUri) {
+      const doc = await vscode.workspace.openTextDocument(reportUri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }
+  };
+
   const updateAllInFile = async (uri: vscode.Uri, kind: 'patch' | 'minor' | 'major') => {
     const updates = updatesByFile.get(uri.toString());
     if (!updates) return;
@@ -183,6 +305,28 @@ export function activate(context: vscode.ExtensionContext) {
     const doc = await vscode.workspace.openTextDocument(uri);
     const editor = await vscode.window.showTextDocument(doc, { preview: false });
     const locs = parseDependencyValueLocations(doc);
+
+    const confirmUpdate = Boolean(vscode.workspace.getConfiguration('packageUpdates').get('confirmUpdate') ?? false);
+    if (confirmUpdate) {
+      const previewLines: string[] = [];
+      for (const u of targetUpdates.slice(0, 5)) {
+        const loc = locs.find((l) => l.section === u.section && l.name === u.name);
+        if (!loc) continue;
+        const oldQuoted = doc.getText(loc.valueRange);
+        const oldVal = oldQuoted.replace(/^"/, '').replace(/"$/, '');
+        const targetVersion = u.available[kind]!;
+        const prefix = oldVal.startsWith('~') ? '~' : oldVal.startsWith('^') ? '^' : kind === 'patch' ? '~' : '^';
+        const newVal = `${prefix}${targetVersion}`;
+        previewLines.push(`${u.name}: ${oldVal} -> ${newVal}`);
+      }
+
+      const preview = previewLines.length ? previewLines.join('\n') : `About to update ${targetUpdates.length} entries.`;
+      const picked = await vscode.window.showQuickPick(['Apply', 'Cancel'], {
+        placeHolder: `Confirm update (${kind})\n${preview}`
+      });
+
+      if (picked !== 'Apply') return;
+    }
 
     await editor.edit((eb) => {
       for (const u of targetUpdates) {
@@ -210,6 +354,28 @@ export function activate(context: vscode.ExtensionContext) {
     const doc = await vscode.workspace.openTextDocument(uri);
     const editor = await vscode.window.showTextDocument(doc, { preview: false });
     const locs = parseDependencyValueLocations(doc);
+
+    const confirmUpdate = Boolean(vscode.workspace.getConfiguration('packageUpdates').get('confirmUpdate') ?? false);
+    if (confirmUpdate) {
+      const previewLines: string[] = [];
+      for (const u of targetUpdates.slice(0, 5)) {
+        const loc = locs.find((l) => l.section === u.section && l.name === u.name);
+        if (!loc) continue;
+        const oldQuoted = doc.getText(loc.valueRange);
+        const oldVal = oldQuoted.replace(/^"/, '').replace(/"$/, '');
+        const targetVersion = u.available[kind]!;
+        const prefix = oldVal.startsWith('~') ? '~' : oldVal.startsWith('^') ? '^' : kind === 'patch' ? '~' : '^';
+        const newVal = `${prefix}${targetVersion}`;
+        previewLines.push(`${u.name}: ${oldVal} -> ${newVal}`);
+      }
+
+      const preview = previewLines.length ? previewLines.join('\n') : `About to update ${targetUpdates.length} entries.`;
+      const picked = await vscode.window.showQuickPick(['Apply', 'Cancel'], {
+        placeHolder: `Confirm update (${section}, ${kind})\n${preview}`
+      });
+
+      if (picked !== 'Apply') return;
+    }
 
     await editor.edit((eb) => {
       for (const u of targetUpdates) {
@@ -295,9 +461,16 @@ export function activate(context: vscode.ExtensionContext) {
         { label: 'Vulnerabilities (OSV)', id: 'osv' as const },
         { label: 'Deprecated + Vulnerabilities', id: 'both' as const }
       ],
-      { title: 'Package Updates: Run checks', canPickMany: false }
+      { title: 'Package Updates: Run Deprecated + OSV checks', canPickMany: false }
     );
     if (!picked) return;
+
+    const scanModeLabel =
+      picked.id === 'deprecated'
+        ? 'Deprecated packages'
+        : picked.id === 'osv'
+          ? 'Vulnerabilities (OSV)'
+          : 'Deprecated + Vulnerabilities';
 
     const uris = await findAllPackageJsonFiles();
     if (uris.length === 0) {
@@ -306,6 +479,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     diagnostics.clear();
+    const reportRows: PackageJsonScanReportRow[] = [];
 
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Package Updates: running checks…', cancellable: true },
@@ -364,6 +538,18 @@ export function activate(context: vscode.ExtensionContext) {
               );
               d.source = 'npm Version Updates Lens';
               fileDiagnostics.push(d);
+              reportRows.push({
+                packageJsonRel: vscode.workspace.asRelativePath(uri),
+                section: u.section,
+                name: u.name,
+                declaredRange: u.range,
+                checkedVersion: version,
+                deprecatedMessage: deprecatedMsg,
+                osvSeverity: osvRes.severity,
+                osvSummary: osvRes.summary,
+                osvDetailsUrl: osvRes.detailsUrl,
+                vulnIds: osvRes.vulnIds
+              });
               return;
             }
 
@@ -371,6 +557,15 @@ export function activate(context: vscode.ExtensionContext) {
               const d = new vscode.Diagnostic(range, `Deprecated: ${deprecatedMsg}`, vscode.DiagnosticSeverity.Warning);
               d.source = 'npm Version Updates Lens';
               fileDiagnostics.push(d);
+              reportRows.push({
+                packageJsonRel: vscode.workspace.asRelativePath(uri),
+                section: u.section,
+                name: u.name,
+                declaredRange: u.range,
+                checkedVersion: version,
+                deprecatedMessage: deprecatedMsg,
+                vulnIds: []
+              });
               return;
             }
 
@@ -384,6 +579,18 @@ export function activate(context: vscode.ExtensionContext) {
               const d = new vscode.Diagnostic(range, `${osvRes.summary} for ${u.name}@${version}`, sev);
               d.source = 'OSV';
               fileDiagnostics.push(d);
+              reportRows.push({
+                packageJsonRel: vscode.workspace.asRelativePath(uri),
+                section: u.section,
+                name: u.name,
+                declaredRange: u.range,
+                checkedVersion: version,
+                deprecatedMessage: null,
+                osvSeverity: osvRes.severity,
+                osvSummary: osvRes.summary,
+                osvDetailsUrl: osvRes.detailsUrl,
+                vulnIds: osvRes.vulnIds
+              });
               return;
             }
           });
@@ -396,7 +603,19 @@ export function activate(context: vscode.ExtensionContext) {
       }
     );
 
-    vscode.window.showInformationMessage('Package Updates: checks complete (see Problems).');
+    const md = renderPackageJsonScanMarkdown(reportRows, scanModeLabel);
+    const reportUri = await writePackageJsonScanReportToWorkspaceRoot(md);
+
+    const openReport = 'Open Markdown report';
+    const msg = reportUri
+      ? 'Package Updates: checks complete (see Problems). Markdown written to workspace root.'
+      : 'Package Updates: checks complete (see Problems). Markdown report was not written.';
+
+    const pickedAction = await vscode.window.showInformationMessage(msg, ...(reportUri ? [openReport] : []));
+    if (pickedAction === openReport && reportUri) {
+      const doc = await vscode.workspace.openTextDocument(reportUri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }
   };
 
   context.subscriptions.push(
@@ -421,6 +640,14 @@ export function activate(context: vscode.ExtensionContext) {
           oldVal.startsWith('~') ? '~' : oldVal.startsWith('^') ? '^' : kind === 'patch' ? '~' : '^';
         const newVal = `${prefix}${targetVersion}`;
         const newQuoted = `"${newVal}"`;
+
+        const confirmUpdate = Boolean(vscode.workspace.getConfiguration('packageUpdates').get('confirmUpdate') ?? false);
+        if (confirmUpdate) {
+          const picked = await vscode.window.showQuickPick(['Apply', 'Cancel'], {
+            placeHolder: `Apply update to ${depName}?\n${oldVal} -> ${newVal}`
+          });
+          if (picked !== 'Apply') return;
+        }
 
         await editor.edit((eb) => eb.replace(loc.valueRange, newQuoted));
         await doc.save();
@@ -449,6 +676,10 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand('packageUpdates.runChecks', runChecks),
+    vscode.commands.registerCommand(
+      'packageUpdates.runLockfileVulnerabilityReport',
+      runLockfileVulnerabilityReport
+    ),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('packageUpdates')) {
         output.appendLine('Config changed: recreating registry client.');

@@ -1,4 +1,4 @@
-type OsvSeverity = 'CRITICAL' | 'HIGH' | 'MODERATE' | 'LOW' | 'UNKNOWN';
+export type OsvSeverity = 'CRITICAL' | 'HIGH' | 'MODERATE' | 'LOW' | 'UNKNOWN';
 
 export type OsvResult = {
   severity: OsvSeverity;
@@ -87,7 +87,11 @@ export class OsvClient {
       }
 
       const summary = `Found ${vulns.length} vulnerabilities (${sev})`;
-      const detailsUrl = ids.length ? `https://osv.dev/list?ecosystem=npm&search=${encodeURIComponent(name)}` : undefined;
+      // OSV list page expects `q=` for free-text search, plus `ecosystem=npm`.
+      // Example: https://osv.dev/list?q=REACT-ROUTER&ecosystem=npm
+      const detailsUrl = ids.length
+        ? `https://osv.dev/list?q=${encodeURIComponent(name)}&ecosystem=npm`
+        : undefined;
 
       const result: OsvResult = { severity: sev, summary, detailsUrl, vulnIds: Array.from(new Set(ids)) };
       this.cacheSet(cacheKey, result);

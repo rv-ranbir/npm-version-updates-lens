@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0
+
+- Release tooling: add Jira-ready Markdown reports for both the `package.json` scan and the lockfile OSV scan.
+- UX: lockfile OSV findings now include a clickable `package-lock.json` link from the VS Code Problems panel.
+- OSV output: per-vulnerability links now use the OSV list-page structure (`q=`) and include `https://osv.dev/vulnerability/<ID>` references.
+
 ## 0.0.1
 
 - Initial release: scan workspace, inline annotations, quick-pick list of outdated dependencies.
